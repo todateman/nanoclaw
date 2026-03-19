@@ -1,13 +1,20 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
+
+import { CronExpressionParser } from 'cron-parser';
 
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
+  REPORT_CHANNEL,
+  SPREADSHEET_ID,
+  TASK_CHANNELS,
   TIMEZONE,
   TRIGGER_PATTERN,
+  WEEKLY_REPORT_CRON,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
@@ -31,10 +38,12 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  createTask,
   getMessagesSince,
   getNewMessages,
   getRegisteredGroup,
   getRouterState,
+  getTaskById,
   initDatabase,
   setRegisteredGroup,
   setRouterState,
@@ -116,6 +125,132 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   logger.info(
     { jid, name: group.name, folder: group.folder },
     'Group registered',
+  );
+}
+
+/**
+ * Auto-register Discord channels listed in TASK_CHANNELS env var as task-bot group entries.
+ * Each channel gets requiresTrigger=false so any message is forwarded to the agent.
+ * The task-bot group's CLAUDE.md handles keyword detection and Sheets updates.
+ */
+function autoRegisterTaskChannels(): void {
+  if (TASK_CHANNELS.length === 0) return;
+
+  const homeDir = process.env.HOME || os.homedir();
+  const gsheetsDir = path.join(homeDir, '.config', 'nanoclaw', 'gsheets');
+
+  for (const channelId of TASK_CHANNELS) {
+    const jid = `dc:${channelId}`;
+    const existing = registeredGroups[jid];
+
+    if (existing && existing.folder === 'task-bot') {
+      logger.debug({ jid }, 'Task channel already registered, skipping');
+      continue;
+    }
+
+    if (existing && existing.folder !== 'task-bot') {
+      logger.warn(
+        { jid, folder: existing.folder },
+        'Channel already registered to a different group — skipping TASK_CHANNELS auto-registration',
+      );
+      continue;
+    }
+
+    registerGroup(jid, {
+      name: `Task Channel #${channelId}`,
+      folder: 'task-bot',
+      trigger: TRIGGER_PATTERN.source,
+      added_at: new Date().toISOString(),
+      requiresTrigger: false,
+      containerConfig: {
+        additionalMounts: [
+          {
+            hostPath: gsheetsDir,
+            containerPath: 'gsheets',
+            readonly: true,
+          },
+        ],
+      },
+    });
+
+    logger.info(
+      { jid, channelId },
+      'Task channel auto-registered → task-bot group',
+    );
+  }
+
+  // Write SPREADSHEET_ID to the group folder so containers can read it
+  if (SPREADSHEET_ID) {
+    try {
+      const groupDir = resolveGroupFolderPath('task-bot');
+      fs.mkdirSync(groupDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(groupDir, '.spreadsheet_id'),
+        SPREADSHEET_ID,
+        'utf-8',
+      );
+      logger.debug(
+        { spreadsheetId: SPREADSHEET_ID },
+        'Spreadsheet ID written to task-bot group folder',
+      );
+    } catch (err) {
+      logger.warn(
+        { err },
+        'Failed to write .spreadsheet_id to task-bot group folder',
+      );
+    }
+  }
+}
+
+/**
+ * Seed the weekly Discord progress report as a scheduled task if it doesn't exist yet.
+ * Runs once at startup; idempotent (skips if the task already exists in the DB).
+ */
+function seedWeeklyReportTask(): void {
+  if (!REPORT_CHANNEL) return;
+
+  const taskId = 'weekly-discord-report';
+  const existing = getTaskById(taskId);
+  if (existing) {
+    logger.debug(
+      { taskId },
+      'Weekly report task already exists, skipping seed',
+    );
+    return;
+  }
+
+  const jid = `dc:${REPORT_CHANNEL}`;
+  const nextRun = CronExpressionParser.parse(WEEKLY_REPORT_CRON, {
+    tz: TIMEZONE,
+  })
+    .next()
+    .toISOString();
+
+  createTask({
+    id: taskId,
+    group_folder: 'task-bot',
+    chat_jid: jid,
+    prompt: [
+      'Discordの週次進捗レポートを生成して投稿してください。',
+      '',
+      '手順:',
+      '1. Google Sheetsから未完了タスク一覧を取得する',
+      '2. 優先度・担当者別に整理し、3日以内に期限が来るタスクには⚠️を付ける',
+      '3. Discordのマークダウン形式でレポートを作成する（テーブル・見出し使用可）',
+      '4. レポートの末尾に "週次リマインド from タスクBot" を添える',
+      '5. レポートをこのチャンネルに投稿する',
+    ].join('\n'),
+    schedule_type: 'cron',
+    schedule_value: WEEKLY_REPORT_CRON,
+    context_mode: 'isolated',
+    next_run: nextRun,
+    status: 'active',
+    created_at: new Date().toISOString(),
+  });
+
+  logger.info(
+    { taskId, jid, cron: WEEKLY_REPORT_CRON, nextRun },
+    'Weekly Discord report task seeded',
   );
 }
 
@@ -475,6 +610,8 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+  autoRegisterTaskChannels();
+  seedWeeklyReportTask();
   restoreRemoteControl();
 
   // Start credential proxy (containers route API calls through this)

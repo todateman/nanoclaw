@@ -6,13 +6,19 @@ import { readEnvFile } from './env.js';
 // Read config values from .env (falls back to process.env).
 // Secrets (API keys, tokens) are NOT read here — they are loaded only
 // by the credential proxy (credential-proxy.ts), never exposed to containers.
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'CLAUDE_CODE_MODEL',
+]);
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
+export const CLAUDE_CODE_MODEL =
+  process.env.CLAUDE_CODE_MODEL || envConfig.CLAUDE_CODE_MODEL || '';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
@@ -71,3 +77,35 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Task bot configuration
+const taskBotEnv = readEnvFile([
+  'TASK_CHANNELS',
+  'REPORT_CHANNEL',
+  'SPREADSHEET_ID',
+  'WEEKLY_REPORT_CRON',
+]);
+
+/** Comma-separated Discord channel IDs to monitor for task messages (no @mention needed) */
+export const TASK_CHANNELS: string[] = (
+  process.env.TASK_CHANNELS ||
+  taskBotEnv.TASK_CHANNELS ||
+  ''
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+/** Discord channel ID where the weekly progress report is posted */
+export const REPORT_CHANNEL: string =
+  process.env.REPORT_CHANNEL || taskBotEnv.REPORT_CHANNEL || '';
+
+/** Google Spreadsheet ID for task management */
+export const SPREADSHEET_ID: string =
+  process.env.SPREADSHEET_ID || taskBotEnv.SPREADSHEET_ID || '';
+
+/** Cron expression for the weekly report (default: every Sunday at 9:00 AM) */
+export const WEEKLY_REPORT_CRON: string =
+  process.env.WEEKLY_REPORT_CRON ||
+  taskBotEnv.WEEKLY_REPORT_CRON ||
+  '0 9 * * 0';
