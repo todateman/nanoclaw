@@ -39,6 +39,7 @@ import {
   getAllSessions,
   getAllTasks,
   createTask,
+  updateTask,
   getMessagesSince,
   getNewMessages,
   getRegisteredGroup,
@@ -211,11 +212,36 @@ function seedWeeklyReportTask(): void {
 
   const taskId = 'weekly-discord-report';
   const existing = getTaskById(taskId);
+
+  const prompt = [
+    'Discordの週次進捗レポートを生成して投稿してください。',
+    '',
+    '手順:',
+    '1. Google Sheetsから未完了タスク一覧を取得する',
+    '2. 優先度・担当者別に整理し、3日以内に期限が来るタスクには⚠️を付ける',
+    '3. Discordのマークダウン形式でレポートを作成する（テーブル・見出し使用可）',
+    '4. レポートの末尾にスプレッドシートへの直接リンクを含める:',
+    '   SPREADSHEET_ID=$(cat /workspace/group/.spreadsheet_id)',
+    '   URL="https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}"',
+    '   形式: 📋 **タスクシートを直接編集**: <URL>',
+    '5. レポートの末尾に "週次リマインド from タスクBot" を添える',
+    '6. レポートをこのチャンネルに投稿する',
+  ].join('\n');
+
   if (existing) {
-    logger.debug(
-      { taskId },
-      'Weekly report task already exists, skipping seed',
-    );
+    // Patch prompt if it predates the Sheets-link feature
+    if (!existing.prompt.includes('タスクシートを直接編集')) {
+      updateTask(taskId, { prompt });
+      logger.info(
+        { taskId },
+        'Weekly report task prompt patched with Sheets link',
+      );
+    } else {
+      logger.debug(
+        { taskId },
+        'Weekly report task already exists, skipping seed',
+      );
+    }
     return;
   }
 
@@ -230,16 +256,7 @@ function seedWeeklyReportTask(): void {
     id: taskId,
     group_folder: 'task-bot',
     chat_jid: jid,
-    prompt: [
-      'Discordの週次進捗レポートを生成して投稿してください。',
-      '',
-      '手順:',
-      '1. Google Sheetsから未完了タスク一覧を取得する',
-      '2. 優先度・担当者別に整理し、3日以内に期限が来るタスクには⚠️を付ける',
-      '3. Discordのマークダウン形式でレポートを作成する（テーブル・見出し使用可）',
-      '4. レポートの末尾に "週次リマインド from タスクBot" を添える',
-      '5. レポートをこのチャンネルに投稿する',
-    ].join('\n'),
+    prompt,
     schedule_type: 'cron',
     schedule_value: WEEKLY_REPORT_CRON,
     context_mode: 'isolated',

@@ -190,6 +190,36 @@ export class DiscordChannel implements Channel {
     });
   }
 
+  private wrapMarkdownTables(text: string): string {
+    const lines = text.split('\n');
+    const result: string[] = [];
+    let tableLines: string[] = [];
+
+    const isTableRow = (line: string) => /^\s*\|.*\|\s*$/.test(line);
+
+    for (const line of lines) {
+      if (isTableRow(line)) {
+        tableLines.push(line);
+      } else {
+        if (tableLines.length > 0) {
+          result.push('```');
+          result.push(...tableLines);
+          result.push('```');
+          tableLines = [];
+        }
+        result.push(line);
+      }
+    }
+
+    if (tableLines.length > 0) {
+      result.push('```');
+      result.push(...tableLines);
+      result.push('```');
+    }
+
+    return result.join('\n');
+  }
+
   async sendMessage(jid: string, text: string): Promise<void> {
     if (!this.client) {
       logger.warn('Discord client not initialized');
@@ -207,13 +237,16 @@ export class DiscordChannel implements Channel {
 
       const textChannel = channel as TextChannel;
 
+      // Wrap markdown tables in code blocks for proper Discord rendering
+      const formatted = this.wrapMarkdownTables(text);
+
       // Discord has a 2000 character limit per message — split if needed
       const MAX_LENGTH = 2000;
-      if (text.length <= MAX_LENGTH) {
-        await textChannel.send(text);
+      if (formatted.length <= MAX_LENGTH) {
+        await textChannel.send(formatted);
       } else {
-        for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await textChannel.send(text.slice(i, i + MAX_LENGTH));
+        for (let i = 0; i < formatted.length; i += MAX_LENGTH) {
+          await textChannel.send(formatted.slice(i, i + MAX_LENGTH));
         }
       }
       logger.info({ jid, length: text.length }, 'Discord message sent');
