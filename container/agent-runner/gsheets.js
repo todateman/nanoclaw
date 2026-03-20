@@ -75,12 +75,10 @@ async function getAllRows(spreadsheetId) {
   return response.data.values || [];
 }
 
-async function getTasks() {
-  const spreadsheetId = resolveSpreadsheetId();
-  const rows = await getAllRows(spreadsheetId);
-  const tasks = rows
+function parseRows(rows, { includeAll = false } = {}) {
+  return rows
     .map((row, idx) => ({
-      rowIndex: idx + 2, // 1-based, row 1 is header
+      rowIndex: idx + 2,
       id: row[COL_ID] || '',
       name: row[COL_TASK_NAME] || '',
       category: row[COL_CATEGORY] || '',
@@ -91,54 +89,70 @@ async function getTasks() {
       progress: row[COL_PROGRESS] || '',
       updatedAt: row[COL_UPDATED_AT] || '',
     }))
-    .filter((t) => t.name && !DONE_STATUSES.includes(t.status));
+    .filter((t) => t.name && (includeAll || !DONE_STATUSES.includes(t.status)));
+}
 
-  console.log(JSON.stringify(tasks, null, 2));
+async function getTasks() {
+  const spreadsheetId = resolveSpreadsheetId();
+  const rows = await getAllRows(spreadsheetId);
+  console.log(JSON.stringify(parseRows(rows), null, 2));
+}
+
+async function getAllTasks() {
+  const spreadsheetId = resolveSpreadsheetId();
+  const rows = await getAllRows(spreadsheetId);
+  console.log(JSON.stringify(parseRows(rows, { includeAll: true }), null, 2));
+}
+
+/**
+ * Find the best matching row for a task hint.
+ * Returns { matchRow, matchName } or null if no match.
+ */
+function findTaskRow(rows, taskHint) {
+  // Stage 1: exact substring match
+  for (let i = 0; i < rows.length; i++) {
+    const name = rows[i][COL_TASK_NAME] || '';
+    if (name.includes(taskHint)) {
+      return { matchRow: i + 2, matchName: name };
+    }
+  }
+
+  // Stage 2: word-overlap fuzzy search
+  const hintWords = taskHint
+    .toLowerCase()
+    .split(/[\s　]+/)
+    .filter(Boolean);
+  let bestScore = 0;
+  let bestRow = -1;
+  let bestName = '';
+  for (let i = 0; i < rows.length; i++) {
+    const name = (rows[i][COL_TASK_NAME] || '').toLowerCase();
+    let score = 0;
+    for (const word of hintWords) {
+      if (name.includes(word)) score++;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestRow = i + 2;
+      bestName = rows[i][COL_TASK_NAME] || '';
+    }
+  }
+
+  if (bestScore === 0) return null;
+  console.error(
+    `あいまい検索でマッチ: "${taskHint}" → "${bestName}" (スコア: ${bestScore})`,
+  );
+  return { matchRow: bestRow, matchName: bestName };
 }
 
 async function updateStatus(taskHint, newStatus) {
   const spreadsheetId = resolveSpreadsheetId();
   const rows = await getAllRows(spreadsheetId);
 
-  // Stage 1: exact substring match
-  let matchRow = -1;
-  let matchName = '';
-
-  for (let i = 0; i < rows.length; i++) {
-    const name = rows[i][COL_TASK_NAME] || '';
-    if (name.includes(taskHint)) {
-      matchRow = i + 2;
-      matchName = name;
-      break;
-    }
-  }
-
-  // Stage 2: word-overlap fuzzy search
-  if (matchRow === -1) {
-    const hintWords = taskHint
-      .toLowerCase()
-      .split(/[\s　]+/)
-      .filter(Boolean);
-    let bestScore = 0;
-    for (let i = 0; i < rows.length; i++) {
-      const name = (rows[i][COL_TASK_NAME] || '').toLowerCase();
-      let score = 0;
-      for (const word of hintWords) {
-        if (name.includes(word)) score++;
-      }
-      if (score > bestScore) {
-        bestScore = score;
-        matchRow = i + 2;
-        matchName = rows[i][COL_TASK_NAME] || '';
-      }
-    }
-    if (bestScore === 0) {
-      console.error(`タスクが見つかりません: "${taskHint}"`);
-      process.exit(1);
-    }
-    console.error(
-      `あいまい検索でマッチ: "${taskHint}" → "${matchName}" (スコア: ${bestScore})`,
-    );
+  const match = findTaskRow(rows, taskHint);
+  if (!match) {
+    console.error(`タスクが見つかりません: "${taskHint}"`);
+    process.exit(1);
   }
 
   const sheets = await getSheets();
@@ -147,14 +161,128 @@ async function updateStatus(taskHint, newStatus) {
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: `${SHEET_NAME}!G${matchRow}:I${matchRow}`,
+    range: `${SHEET_NAME}!G${match.matchRow}:I${match.matchRow}`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
       values: [[newStatus, '', now]],
     },
   });
 
-  console.log(`✅ "${matchName}" のステータスを "${newStatus}" に更新しました`);
+  console.log(`✅ "${match.matchName}" のステータスを "${newStatus}" に更新しました`);
+}
+
+async function updateProgress(taskHint, progressNote, newStatus) {
+  const spreadsheetId = resolveSpreadsheetId();
+  const rows = await getAllRows(spreadsheetId);
+
+  const match = findTaskRow(rows, taskHint);
+  if (!match) {
+    console.error(`タスクが見つかりません: "${taskHint}"`);
+    process.exit(1);
+  }
+
+  const existingProgress = rows[match.matchRow - 2][COL_PROGRESS] || '';
+  const updatedProgress = existingProgress
+    ? `${existingProgress}\n${progressNote}`
+    : progressNote;
+
+  const sheets = await getSheets();
+  const tz = process.env.TZ || 'Asia/Tokyo';
+  const now = new Date().toLocaleString('ja-JP', { timeZone: tz });
+
+  if (newStatus) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${SHEET_NAME}!G${match.matchRow}:I${match.matchRow}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[newStatus, updatedProgress, now]],
+      },
+    });
+  } else {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${SHEET_NAME}!H${match.matchRow}:I${match.matchRow}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[updatedProgress, now]],
+      },
+    });
+  }
+
+  const statusMsg = newStatus ? ` (ステータス: ${newStatus})` : '';
+  console.log(`✅ "${match.matchName}" に進捗を追記しました${statusMsg}`);
+}
+
+async function batchUpdate(updatesJson) {
+  let updates;
+  try {
+    updates = JSON.parse(updatesJson);
+  } catch {
+    console.error('エラー: JSON解析に失敗しました');
+    process.exit(1);
+  }
+
+  if (!Array.isArray(updates) || updates.length === 0) {
+    console.error('エラー: 空の更新配列です');
+    process.exit(1);
+  }
+
+  const spreadsheetId = resolveSpreadsheetId();
+  const rows = await getAllRows(spreadsheetId);
+  const sheets = await getSheets();
+  const tz = process.env.TZ || 'Asia/Tokyo';
+  const now = new Date().toLocaleString('ja-JP', { timeZone: tz });
+
+  const batchData = [];
+  const results = [];
+
+  for (const upd of updates) {
+    const match = findTaskRow(rows, upd.taskHint);
+    if (!match) {
+      results.push(`⚠️ "${upd.taskHint}" が見つかりませんでした`);
+      continue;
+    }
+
+    const existingProgress = rows[match.matchRow - 2][COL_PROGRESS] || '';
+    const updatedProgress = upd.progress
+      ? existingProgress
+        ? `${existingProgress}\n${upd.progress}`
+        : upd.progress
+      : existingProgress;
+
+    if (upd.status) {
+      batchData.push({
+        range: `${SHEET_NAME}!G${match.matchRow}:I${match.matchRow}`,
+        values: [[upd.status, updatedProgress, now]],
+      });
+    } else if (upd.progress) {
+      batchData.push({
+        range: `${SHEET_NAME}!H${match.matchRow}:I${match.matchRow}`,
+        values: [[updatedProgress, now]],
+      });
+    }
+
+    // Update local rows cache so subsequent matches see the new progress
+    rows[match.matchRow - 2][COL_PROGRESS] = updatedProgress;
+    if (upd.status) rows[match.matchRow - 2][COL_STATUS] = upd.status;
+
+    const statusMsg = upd.status ? ` → ${upd.status}` : '';
+    results.push(`✅ "${match.matchName}"${statusMsg}`);
+  }
+
+  if (batchData.length > 0) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        valueInputOption: 'USER_ENTERED',
+        data: batchData,
+      },
+    });
+  }
+
+  for (const r of results) console.log(r);
+  console.log(`\n合計: ${batchData.length}件 更新`);
 }
 
 async function addTask(name, category, priority, dueDate, assignee) {
@@ -195,6 +323,8 @@ const [, , command, ...args] = process.argv;
 try {
   if (command === 'get-tasks') {
     await getTasks();
+  } else if (command === 'get-all-tasks') {
+    await getAllTasks();
   } else if (command === 'update-status') {
     const [taskHint, newStatus] = args;
     if (!taskHint || !newStatus) {
@@ -202,22 +332,40 @@ try {
       process.exit(1);
     }
     await updateStatus(taskHint, newStatus);
+  } else if (command === 'update-progress') {
+    const [taskHint, progressNote, newStatus] = args;
+    if (!taskHint || !progressNote) {
+      console.error(
+        'Usage: gsheets.js update-progress <task-hint> <progress-note> [new-status]',
+      );
+      process.exit(1);
+    }
+    await updateProgress(taskHint, progressNote, newStatus || null);
+  } else if (command === 'batch-update') {
+    const [updatesJson] = args;
+    if (!updatesJson) {
+      console.error(
+        'Usage: gsheets.js batch-update \'[{"taskHint":"...","progress":"...","status":"..."}]\'',
+      );
+      process.exit(1);
+    }
+    await batchUpdate(updatesJson);
   } else if (command === 'add-task') {
     const [name, category, priority, dueDate, assignee] = args;
     if (!name) {
       console.error(
-        'Usage: gsheets.js add-task <name> [category] [priority] [due-date] [assignee]',
+        'Usage: gsheets.js add-task <n> [category] [priority] [due-date] [assignee]',
       );
       process.exit(1);
     }
     await addTask(name, category, priority, dueDate, assignee);
   } else {
     console.error(
-      'コマンド: get-tasks | update-status <hint> <status> | add-task <name> [category] [priority] [due] [assignee]',
+      '\u30b3\u30de\u30f3\u30c9: get-tasks | get-all-tasks | update-status | update-progress | batch-update | add-task',
     );
     process.exit(1);
   }
 } catch (err) {
-  console.error('エラー:', err.message);
+  console.error('\u30a8\u30e9\u30fc:', err.message);
   process.exit(1);
 }

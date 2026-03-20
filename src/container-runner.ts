@@ -216,15 +216,17 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  modelOverride?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Pass model override if configured
-  if (CLAUDE_CODE_MODEL) {
-    args.push('-e', `CLAUDE_CODE_MODEL=${CLAUDE_CODE_MODEL}`);
+  // Pass model override if configured (per-group override takes precedence)
+  const model = modelOverride || CLAUDE_CODE_MODEL;
+  if (model) {
+    args.push('-e', `CLAUDE_CODE_MODEL=${model}`);
   }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
@@ -284,7 +286,11 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(
+    mounts,
+    containerName,
+    group.containerConfig?.modelOverride,
+  );
 
   logger.debug(
     {

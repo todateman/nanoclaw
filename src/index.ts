@@ -7,10 +7,12 @@ import { CronExpressionParser } from 'cron-parser';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  DAILY_SCAN_CRON,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   REPORT_CHANNEL,
   SPREADSHEET_ID,
+  TASK_BOT_MODEL,
   TASK_CHANNELS,
   TIMEZONE,
   TRIGGER_PATTERN,
@@ -82,6 +84,19 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+/**
+ * Debounce timers for task-bot groups.
+ * Instead of processing every single message immediately, we wait for a
+ * quiet period (TASK_BOT_DEBOUNCE_MS) so the agent receives a batch of
+ * related messages as a single prompt — dramatically improving context.
+ */
+const TASK_BOT_DEBOUNCE_MS = 3 * 60 * 1000; // 3 minutes
+const taskBotDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function isTaskBotGroup(group: RegisteredGroup): boolean {
+  return group.folder === 'task-bot';
+}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -171,6 +186,7 @@ function autoRegisterTaskChannels(): void {
             readonly: true,
           },
         ],
+        ...(TASK_BOT_MODEL ? { modelOverride: TASK_BOT_MODEL } : {}),
       },
     });
 
@@ -268,6 +284,73 @@ function seedWeeklyReportTask(): void {
   logger.info(
     { taskId, jid, cron: WEEKLY_REPORT_CRON, nextRun },
     'Weekly Discord report task seeded',
+  );
+}
+
+/**
+ * Seed a daily task-scan job that reviews the day's Discord conversations
+ * and reconciles them against the Google Sheets task list.
+ * Catches tasks the real-time per-message handler may have missed.
+ */
+function seedDailyTaskScanTask(): void {
+  if (!REPORT_CHANNEL) return;
+
+  const taskId = 'daily-task-scan';
+  const existing = getTaskById(taskId);
+
+  const prompt = [
+    '過去24時間のDiscord会話を振り返り、タスク一覧を更新してください。',
+    '',
+    '手順:',
+    '1. get-all-tasks で現在の全タスク一覧（完了含む）を取得する',
+    '2. このチャンネルの過去24時間の会話を確認する（conversations/ フォルダ参照）',
+    '3. 以下を実行する:',
+    '   - 作業完了の報告があるタスク → update-progress で進捗追記、必要ならステータスを完了に',
+    '   - 新しい作業・課題が話題に出ていてタスク未登録 → add-task で新規追加',
+    '   - 複数の変更がある場合は batch-update でまとめて更新',
+    '4. 変更があった場合のみ、変更サマリーをこのチャンネルに投稿する',
+    '5. 変更がなければ何も投稿しない',
+    '',
+    '注意:',
+    '- 雑談やリアクションはスキップする',
+    '- 迷ったら見逃す方に倒す（過検出よりまし）',
+    '- 進捗メモは「YYYY/MM/DD：内容」形式で記録する',
+  ].join('\n');
+
+  if (existing) {
+    // Patch prompt if outdated
+    if (!existing.prompt.includes('batch-update')) {
+      updateTask(taskId, { prompt });
+      logger.info({ taskId }, 'Daily task scan prompt patched');
+    } else {
+      logger.debug({ taskId }, 'Daily task scan already exists, skipping seed');
+    }
+    return;
+  }
+
+  const jid = `dc:${REPORT_CHANNEL}`;
+  const nextRun = CronExpressionParser.parse(DAILY_SCAN_CRON, {
+    tz: TIMEZONE,
+  })
+    .next()
+    .toISOString();
+
+  createTask({
+    id: taskId,
+    group_folder: 'task-bot',
+    chat_jid: jid,
+    prompt,
+    schedule_type: 'cron',
+    schedule_value: DAILY_SCAN_CRON,
+    context_mode: 'isolated',
+    next_run: nextRun,
+    status: 'active',
+    created_at: new Date().toISOString(),
+  });
+
+  logger.info(
+    { taskId, jid, cron: DAILY_SCAN_CRON, nextRun },
+    'Daily task scan task seeded',
   );
 }
 
@@ -587,8 +670,30 @@ async function startMessageLoop(): Promise<void> {
                 logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
               );
           } else {
-            // No active container — enqueue for a new one
-            queue.enqueueMessageCheck(chatJid);
+            // No active container — enqueue for a new one.
+            // For task-bot groups, debounce so multiple messages in a
+            // conversation are batched into one agent invocation.
+            if (isTaskBotGroup(group)) {
+              const existingTimer = taskBotDebounceTimers.get(chatJid);
+              if (existingTimer) clearTimeout(existingTimer);
+              taskBotDebounceTimers.set(
+                chatJid,
+                setTimeout(() => {
+                  taskBotDebounceTimers.delete(chatJid);
+                  queue.enqueueMessageCheck(chatJid);
+                  logger.debug(
+                    { chatJid },
+                    'Task-bot debounce fired, enqueuing message check',
+                  );
+                }, TASK_BOT_DEBOUNCE_MS),
+              );
+              logger.debug(
+                { chatJid, debounceMs: TASK_BOT_DEBOUNCE_MS },
+                'Task-bot message debounced',
+              );
+            } else {
+              queue.enqueueMessageCheck(chatJid);
+            }
           }
         }
       }
@@ -629,6 +734,7 @@ async function main(): Promise<void> {
   loadState();
   autoRegisterTaskChannels();
   seedWeeklyReportTask();
+  seedDailyTaskScanTask();
   restoreRemoteControl();
 
   // Start credential proxy (containers route API calls through this)

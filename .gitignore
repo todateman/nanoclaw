@@ -13,10 +13,13 @@ logs/
 groups/*
 !groups/main/
 !groups/global/
+!groups/task-bot/
 groups/main/*
 groups/global/*
+groups/task-bot/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
+!groups/task-bot/CLAUDE.md
 
 # Secrets
 *.keys.json

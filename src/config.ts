@@ -84,6 +84,8 @@ const taskBotEnv = readEnvFile([
   'REPORT_CHANNEL',
   'SPREADSHEET_ID',
   'WEEKLY_REPORT_CRON',
+  'DAILY_SCAN_CRON',
+  'TASK_BOT_MODEL',
 ]);
 
 /** Comma-separated Discord channel IDs to monitor for task messages (no @mention needed) */
@@ -109,3 +111,11 @@ export const WEEKLY_REPORT_CRON: string =
   process.env.WEEKLY_REPORT_CRON ||
   taskBotEnv.WEEKLY_REPORT_CRON ||
   '0 9 * * 0';
+
+/** Cron expression for the daily task scan (default: every day at 22:00) */
+export const DAILY_SCAN_CRON: string =
+  process.env.DAILY_SCAN_CRON || taskBotEnv.DAILY_SCAN_CRON || '0 22 * * *';
+
+/** Model override for the task-bot group (default: empty = use global CLAUDE_CODE_MODEL) */
+export const TASK_BOT_MODEL: string =
+  process.env.TASK_BOT_MODEL || taskBotEnv.TASK_BOT_MODEL || '';
