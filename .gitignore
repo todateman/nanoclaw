@@ -25,6 +25,9 @@ groups/task-bot/*
 *.keys.json
 .env
 
+# Database files
+*.db
+
 # Temp files
 .tmp-*
 

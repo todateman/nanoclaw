@@ -235,7 +235,11 @@ function seedWeeklyReportTask(): void {
     '手順:',
     '1. Google Sheetsから未完了タスク一覧を取得する',
     '2. 優先度・担当者別に整理し、3日以内に期限が来るタスクには⚠️を付ける',
-    '3. Discordのマークダウン形式でレポートを作成する（テーブル・見出し使用可）',
+    '3. 以下のDiscord向けフォーマットでレポートを作成する:',
+    '   - テーブルは使用しない（Discordでは表示されない）',
+    '   - タスクは箇条書きで列挙する',
+    '   - 形式: `• T0001 タスク名 ／ 担当者 ／ 期限 ／ ステータス`',
+    '   - 担当者・ステータス別にグループ化してよい',
     '4. レポートの末尾にスプレッドシートへの直接リンクを含める:',
     '   SPREADSHEET_ID=$(cat /workspace/group/.spreadsheet_id)',
     '   URL="https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}"',
@@ -245,8 +249,8 @@ function seedWeeklyReportTask(): void {
   ].join('\n');
 
   if (existing) {
-    // Patch prompt if it predates the Sheets-link feature
-    if (!existing.prompt.includes('タスクシートを直接編集')) {
+    // Patch prompt if it predates the no-table format
+    if (!existing.prompt.includes('テーブルは使用しない')) {
       updateTask(taskId, { prompt });
       logger.info(
         { taskId },
@@ -299,11 +303,14 @@ function seedDailyTaskScanTask(): void {
   const existing = getTaskById(taskId);
 
   const prompt = [
-    '過去24時間のDiscord会話を振り返り、タスク一覧を更新してください。',
+    '過去7日間のDiscord会話を振り返り、タスク一覧を更新してください。',
     '',
     '手順:',
     '1. get-all-tasks で現在の全タスク一覧（完了含む）を取得する',
-    '2. このチャンネルの過去24時間の会話を確認する（conversations/ フォルダ参照）',
+    '2. conversations/ フォルダから過去7日間の会話ログを確認する:',
+    '   - まず `ls /workspace/group/conversations/ 2>/dev/null` でフォルダの存在を確認する',
+    '   - フォルダが存在しない、または空の場合はこのステップをスキップして手順3へ進む',
+    '   - 存在する場合は7日以内のファイルを読んで会話内容を把握する',
     '3. 以下を実行する:',
     '   - 作業完了の報告があるタスク → update-progress で進捗追記、必要ならステータスを完了に',
     '   - 新しい作業・課題が話題に出ていてタスク未登録 → add-task で新規追加',
@@ -312,6 +319,7 @@ function seedDailyTaskScanTask(): void {
     '5. 変更がなければ何も投稿しない',
     '',
     '注意:',
+    '- conversations/ フォルダがなくても必ずエラーにせず続行する',
     '- 雑談やリアクションはスキップする',
     '- 迷ったら見逃す方に倒す（過検出よりまし）',
     '- 進捗メモは「YYYY/MM/DD：内容」形式で記録する',
@@ -319,7 +327,7 @@ function seedDailyTaskScanTask(): void {
 
   if (existing) {
     // Patch prompt if outdated
-    if (!existing.prompt.includes('batch-update')) {
+    if (!existing.prompt.includes('過去7日間')) {
       updateTask(taskId, { prompt });
       logger.info({ taskId }, 'Daily task scan prompt patched');
     } else {
