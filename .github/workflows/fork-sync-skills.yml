@@ -64,6 +64,13 @@ jobs:
           if ! git merge upstream/main --no-edit; then
             echo "Merge had conflicts, attempting auto-resolution..."
 
+            # Auto-resolve .env.example: take upstream's version
+            if git status --short | grep -qE '^(UU|AA|DD) \.env\.example'; then
+              git checkout --theirs .env.example
+              git add .env.example
+              echo "Auto-resolved: .env.example"
+            fi
+
             # Auto-resolve repo-tokens/badge.svg: take upstream's version
             if git status --short | grep -qE '^(UU|AA|DD) repo-tokens/badge\.svg'; then
               git checkout --theirs repo-tokens/badge.svg
