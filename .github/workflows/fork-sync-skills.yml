@@ -62,11 +62,52 @@ jobs:
 
           # Merge upstream main into fork's main
           if ! git merge upstream/main --no-edit; then
-            echo "::error::Failed to merge upstream/main into fork main — conflicts detected"
-            git merge --abort
-            echo "synced=false" >> "$GITHUB_OUTPUT"
-            echo "sync_failed=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "Merge had conflicts, attempting auto-resolution..."
+
+            # Auto-resolve repo-tokens/badge.svg: take upstream's version
+            if git status --short | grep -qE '^(UU|AA|DD) repo-tokens/badge\.svg'; then
+              git checkout --theirs repo-tokens/badge.svg
+              git add repo-tokens/badge.svg
+              echo "Auto-resolved: repo-tokens/badge.svg"
+            fi
+
+            # Auto-resolve package.json: merge fork's unique additions into upstream's version
+            if git status --short | grep -qE '^UU package\.json'; then
+              git show :1:package.json > /tmp/pkg_base.json
+              git show :2:package.json > /tmp/pkg_ours.json
+              git show :3:package.json > /tmp/pkg_theirs.json
+              jq -s '
+                .[0] as $base | .[1] as $ours | .[2] as $theirs |
+                ($ours.dependencies // {} | to_entries | map(select(.key as $k | ($base.dependencies // {})[$k] == null)) | from_entries) as $added_deps |
+                ($ours.devDependencies // {} | to_entries | map(select(.key as $k | ($base.devDependencies // {})[$k] == null)) | from_entries) as $added_dev_deps |
+                $theirs |
+                .dependencies = (($theirs.dependencies // {}) + $added_deps) |
+                .devDependencies = (($theirs.devDependencies // {}) + $added_dev_deps)
+              ' /tmp/pkg_base.json /tmp/pkg_ours.json /tmp/pkg_theirs.json > package.json
+              git add package.json
+              echo "Auto-resolved: package.json (merged fork additions into upstream)"
+            fi
+
+            # Auto-resolve package-lock.json: regenerate from merged package.json
+            if git status --short | grep -qE '^UU package-lock\.json'; then
+              rm -f package-lock.json
+              npm install --package-lock-only --ignore-scripts --no-audit
+              git add package-lock.json
+              echo "Auto-resolved: package-lock.json (regenerated)"
+            fi
+
+            # Check if any conflicts remain
+            if git status --short | grep -qE '^(UU|AA|DD) '; then
+              echo "::error::Failed to merge upstream/main into fork main — unresolved conflicts remain:"
+              git status --short | grep -E '^(UU|AA|DD) '
+              git merge --abort
+              echo "synced=false" >> "$GITHUB_OUTPUT"
+              echo "sync_failed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            git merge --continue --no-edit
+            echo "All conflicts auto-resolved, merge completed."
           fi
 
           # Validate build
@@ -162,26 +203,35 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `Upstream sync failed — merge conflict or build failure`,
-              body: [
-                'The automated sync with `qwibitai/nanoclaw` main failed.',
-                '',
-                'This usually means upstream made changes that conflict with this fork\'s channel code.',
-                '',
-                'To resolve manually:',
-                '```bash',
-                'git fetch upstream main',
-                'git merge upstream/main',
-                '# resolve conflicts',
-                'npm run build && npm test',
-                'git push',
-                '```',
-              ].join('\n'),
-              labels: ['upstream-sync']
-            });
+            const body = [
+              'The automated sync with `qwibitai/nanoclaw` main failed.',
+              '',
+              'This usually means upstream made changes that conflict with this fork\'s channel code.',
+              '',
+              'To resolve manually:',
+              '```bash',
+              'git fetch upstream main',
+              'git merge upstream/main',
+              '# resolve conflicts',
+              'npm run build && npm test',
+              'git push',
+              '```',
+            ].join('\n');
+            try {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Upstream sync failed — merge conflict or build failure`,
+                body,
+                labels: ['upstream-sync']
+              });
+            } catch (e) {
+              core.warning(`Could not create issue (issues may be disabled): ${e.message}`);
+              await core.summary
+                .addHeading('⚠️ Upstream sync failed')
+                .addRaw(body)
+                .write();
+            }
 
       - name: Open issue for failed skill merges
         if: steps.merge.outputs.failed != ''
@@ -205,10 +255,19 @@ jobs:
               '```',
             ].join('\n');
 
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `Merge-forward failed for ${failed.length} skill branch(es)`,
-              body,
-              labels: ['skill-maintenance']
+            try {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Merge-forward failed for ${failed.length} skill branch(es)`,
+                body,
+                labels: ['skill-maintenance']
+              });
+            } catch (e) {
+              core.warning(`Could not create issue (issues may be disabled): ${e.message}`);
+              await core.summary
+                .addHeading('⚠️ Skill merge-forward failed')
+                .addRaw(body)
+                .write();
+            }
             });
