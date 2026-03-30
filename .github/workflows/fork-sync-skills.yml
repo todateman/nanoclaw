@@ -270,4 +270,3 @@ jobs:
                 .addRaw(body)
                 .write();
             }
-            });
