@@ -113,7 +113,7 @@ jobs:
               exit 0
             fi
 
-            git merge --continue --no-edit
+            GIT_EDITOR=true git merge --continue
             echo "All conflicts auto-resolved, merge completed."
           fi
 
