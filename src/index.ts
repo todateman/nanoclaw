@@ -150,7 +150,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
  * The task-bot group's CLAUDE.md handles keyword detection and Sheets updates.
  */
 function autoRegisterTaskChannels(): void {
-  if (TASK_CHANNELS.length === 0) return;
+  if (TASK_CHANNELS.length === 0 && !REPORT_CHANNEL) return;
 
   const homeDir = process.env.HOME || os.homedir();
   const gsheetsDir = path.join(homeDir, '.config', 'nanoclaw', 'gsheets');
@@ -194,6 +194,42 @@ function autoRegisterTaskChannels(): void {
       { jid, channelId },
       'Task channel auto-registered → task-bot group',
     );
+  }
+
+  // Also register REPORT_CHANNEL so the task-bot container can post
+  // to it via IPC send_message (IPC auth checks targetGroup.folder === sourceGroup)
+  if (REPORT_CHANNEL && !TASK_CHANNELS.includes(REPORT_CHANNEL)) {
+    const reportJid = `dc:${REPORT_CHANNEL}`;
+    const existingReport = registeredGroups[reportJid];
+
+    if (!existingReport) {
+      registerGroup(reportJid, {
+        name: `Report Channel #${REPORT_CHANNEL}`,
+        folder: 'task-bot',
+        trigger: TRIGGER_PATTERN.source,
+        added_at: new Date().toISOString(),
+        requiresTrigger: true,
+        containerConfig: {
+          additionalMounts: [
+            {
+              hostPath: gsheetsDir,
+              containerPath: 'gsheets',
+              readonly: true,
+            },
+          ],
+          ...(TASK_BOT_MODEL ? { modelOverride: TASK_BOT_MODEL } : {}),
+        },
+      });
+      logger.info(
+        { jid: reportJid },
+        'Report channel registered → task-bot group',
+      );
+    } else if (existingReport.folder !== 'task-bot') {
+      logger.warn(
+        { jid: reportJid, folder: existingReport.folder },
+        'Report channel already registered to a different group — IPC messages from task-bot may be blocked',
+      );
+    }
   }
 
   // Write SPREADSHEET_ID to the group folder so containers can read it
@@ -245,16 +281,31 @@ function seedWeeklyReportTask(): void {
     '   URL="https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}"',
     '   形式: 📋 **タスクシートを直接編集**: <URL>',
     '5. レポートの末尾に "週次リマインド from タスクBot" を添える',
-    '6. レポートをこのチャンネルに投稿する',
+    '6. send_message ツールを使ってレポートをこのチャンネルに投稿する（Discord APIを直接呼び出したり、トークンを探したりしてはいけない）',
+    '7. 投稿後は <internal>完了</internal> とだけ出力して終了する（二重投稿防止のため、最終応答のテキストはDiscordに送信されるため）',
   ].join('\n');
 
+  const jid = `dc:${REPORT_CHANNEL}`;
+
   if (existing) {
-    // Patch prompt if it predates the no-table format
-    if (!existing.prompt.includes('テーブルは使用しない')) {
-      updateTask(taskId, { prompt });
+    const updates: Record<string, string> = {};
+    // Patch prompt if it predates the no-table format, explicit send_message instruction, or double-post prevention
+    if (
+      !existing.prompt.includes('テーブルは使用しない') ||
+      !existing.prompt.includes('send_message ツール') ||
+      !existing.prompt.includes('二重投稿防止')
+    ) {
+      updates.prompt = prompt;
+    }
+    // Patch chat_jid if REPORT_CHANNEL changed
+    if (existing.chat_jid !== jid) {
+      updates.chat_jid = jid;
+    }
+    if (Object.keys(updates).length > 0) {
+      updateTask(taskId, updates);
       logger.info(
-        { taskId },
-        'Weekly report task prompt patched with Sheets link',
+        { taskId, updates: Object.keys(updates) },
+        'Weekly report task patched',
       );
     } else {
       logger.debug(
@@ -264,8 +315,6 @@ function seedWeeklyReportTask(): void {
     }
     return;
   }
-
-  const jid = `dc:${REPORT_CHANNEL}`;
   const nextRun = CronExpressionParser.parse(WEEKLY_REPORT_CRON, {
     tz: TIMEZONE,
   })
@@ -325,18 +374,29 @@ function seedDailyTaskScanTask(): void {
     '- 進捗メモは「YYYY/MM/DD：内容」形式で記録する',
   ].join('\n');
 
+  const jid = `dc:${REPORT_CHANNEL}`;
+
   if (existing) {
+    const updates: Record<string, string> = {};
     // Patch prompt if outdated
     if (!existing.prompt.includes('過去7日間')) {
-      updateTask(taskId, { prompt });
-      logger.info({ taskId }, 'Daily task scan prompt patched');
+      updates.prompt = prompt;
+    }
+    // Patch chat_jid if REPORT_CHANNEL changed
+    if (existing.chat_jid !== jid) {
+      updates.chat_jid = jid;
+    }
+    if (Object.keys(updates).length > 0) {
+      updateTask(taskId, updates);
+      logger.info(
+        { taskId, updates: Object.keys(updates) },
+        'Daily task scan patched',
+      );
     } else {
       logger.debug({ taskId }, 'Daily task scan already exists, skipping seed');
     }
     return;
   }
-
-  const jid = `dc:${REPORT_CHANNEL}`;
   const nextRun = CronExpressionParser.parse(DAILY_SCAN_CRON, {
     tz: TIMEZONE,
   })
