@@ -8,6 +8,7 @@ import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
   DAILY_SCAN_CRON,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   REPORT_CHANNEL,
@@ -154,6 +155,12 @@ function autoRegisterTaskChannels(): void {
 
   const homeDir = process.env.HOME || os.homedir();
   const gsheetsDir = path.join(homeDir, '.config', 'nanoclaw', 'gsheets');
+  const discordMainConversationsDir = path.join(
+    GROUPS_DIR,
+    'discord_main',
+    'conversations',
+  );
+  fs.mkdirSync(discordMainConversationsDir, { recursive: true });
 
   for (const channelId of TASK_CHANNELS) {
     const jid = `dc:${channelId}`;
@@ -185,6 +192,11 @@ function autoRegisterTaskChannels(): void {
             containerPath: 'gsheets',
             readonly: true,
           },
+          {
+            hostPath: discordMainConversationsDir,
+            containerPath: 'discord_conversations',
+            readonly: true,
+          },
         ],
         ...(TASK_BOT_MODEL ? { modelOverride: TASK_BOT_MODEL } : {}),
       },
@@ -214,6 +226,11 @@ function autoRegisterTaskChannels(): void {
             {
               hostPath: gsheetsDir,
               containerPath: 'gsheets',
+              readonly: true,
+            },
+            {
+              hostPath: discordMainConversationsDir,
+              containerPath: 'discord_conversations',
               readonly: true,
             },
           ],
@@ -356,9 +373,9 @@ function seedDailyTaskScanTask(): void {
     '',
     '手順:',
     '1. get-all-tasks で現在の全タスク一覧（完了含む）を取得する',
-    '2. conversations/ フォルダから過去7日間の会話ログを確認する:',
-    '   - まず `ls /workspace/group/conversations/ 2>/dev/null` でフォルダの存在を確認する',
-    '   - フォルダが存在しない、または空の場合はこのステップをスキップして手順3へ進む',
+    '2. /workspace/extra/discord_conversations/ フォルダから過去7日間の会話ログを確認する:',
+    '   - まず `ls /workspace/extra/discord_conversations/ 2>/dev/null` でフォルダの存在・内容を確認する',
+    '   - フォルダが空の場合はこのステップをスキップして手順3へ進む',
     '   - 存在する場合は7日以内のファイルを読んで会話内容を把握する',
     '3. 以下を実行する:',
     '   - 作業完了の報告があるタスク → update-progress で進捗追記、必要ならステータスを完了に',
@@ -368,7 +385,7 @@ function seedDailyTaskScanTask(): void {
     '5. 変更がなければ何も投稿しない',
     '',
     '注意:',
-    '- conversations/ フォルダがなくても必ずエラーにせず続行する',
+    '- conversations フォルダが空でも必ずエラーにせず続行する',
     '- 雑談やリアクションはスキップする',
     '- 迷ったら見逃す方に倒す（過検出よりまし）',
     '- 進捗メモは「YYYY/MM/DD：内容」形式で記録する',
@@ -379,7 +396,10 @@ function seedDailyTaskScanTask(): void {
   if (existing) {
     const updates: Record<string, string> = {};
     // Patch prompt if outdated
-    if (!existing.prompt.includes('過去7日間')) {
+    if (
+      !existing.prompt.includes('過去7日間') ||
+      !existing.prompt.includes('/workspace/extra/discord_conversations/')
+    ) {
       updates.prompt = prompt;
     }
     // Patch chat_jid if REPORT_CHANNEL changed
