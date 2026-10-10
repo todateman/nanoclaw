@@ -363,6 +363,16 @@ export function getMessagesSince(
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
 }
 
+/**
+ * Timestamp of the most recent stored message for a chat, if any.
+ */
+export function getLastMessageTime(chatJid: string): string | undefined {
+  const row = db
+    .prepare('SELECT MAX(timestamp) as ts FROM messages WHERE chat_jid = ?')
+    .get(chatJid) as { ts: string | null } | undefined;
+  return row?.ts ?? undefined;
+}
+
 export function createTask(
   task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
 ): void {

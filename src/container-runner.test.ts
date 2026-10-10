@@ -8,6 +8,7 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
+  CLAUDE_CODE_MODEL: '',
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
@@ -206,5 +207,42 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+});
+
+describe('container-runner IPC mounts', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('mounts a per-chat input directory over /workspace/ipc/input', async () => {
+    const { spawn } = await import('child_process');
+    vi.mocked(spawn).mockClear();
+
+    const resultPromise = runContainerAgent(
+      { ...testGroup, folder: 'task-bot' },
+      { ...testInput, groupFolder: 'task-bot', chatJid: 'dc:111' },
+      () => {},
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    const ipcMount = args.indexOf(
+      '/tmp/nanoclaw-test-data/ipc/task-bot:/workspace/ipc',
+    );
+    const inputMount = args.indexOf(
+      '/tmp/nanoclaw-test-data/ipc/task-bot/input/dc_111:/workspace/ipc/input',
+    );
+    expect(ipcMount).toBeGreaterThan(-1);
+    expect(inputMount).toBeGreaterThan(ipcMount);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
   });
 });

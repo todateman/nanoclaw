@@ -35,6 +35,10 @@ vi.mock('discord.js', () => {
     MessageCreate: 'messageCreate',
     ClientReady: 'ready',
     Error: 'error',
+    ShardDisconnect: 'shardDisconnect',
+    ShardReconnecting: 'shardReconnecting',
+    ShardResume: 'shardResume',
+    ShardReady: 'shardReady',
   };
 
   const GatewayIntentBits = {
@@ -69,7 +73,7 @@ vi.mock('discord.js', () => {
       // Fire the ready event
       const readyHandlers = this.eventHandlers.get('ready') || [];
       for (const h of readyHandlers) {
-        h({ user: this.user });
+        await h({ user: this.user });
       }
     }
 
@@ -138,6 +142,7 @@ function createMessage(overrides: {
   reference?: { messageId?: string };
   mentionsBotId?: boolean;
 }) {
+  const createdAt = overrides.createdAt ?? new Date('2024-01-01T00:00:00.000Z');
   const channelId = overrides.channelId ?? '1234567890123456';
   const authorId = overrides.authorId ?? '55512345';
   const botId = '999888777'; // matches mock client user id
@@ -151,7 +156,8 @@ function createMessage(overrides: {
     channelId,
     id: overrides.messageId ?? 'msg_001',
     content: overrides.content ?? 'Hello everyone',
-    createdAt: overrides.createdAt ?? new Date('2024-01-01T00:00:00.000Z'),
+    createdAt,
+    createdTimestamp: createdAt.getTime(),
     author: {
       id: authorId,
       username: overrides.authorUsername ?? 'alice',
@@ -186,6 +192,23 @@ function currentClient() {
 async function triggerMessage(message: any) {
   const handlers = currentClient().eventHandlers.get('messageCreate') || [];
   for (const h of handlers) await h(message);
+}
+
+async function triggerEvent(event: string, ...args: any[]) {
+  const handlers = currentClient().eventHandlers.get(event) || [];
+  for (const h of handlers) await h(...args);
+}
+
+/** Make channels.fetch return a channel whose history holds `messages`. */
+function mockChannelHistory(messages: any[]) {
+  const fetchHistory = vi.fn(async (_query: { after: string }) => {
+    return new Map(messages.map((m) => [m.id, m]));
+  });
+  currentClient().channels.fetch = vi.fn().mockResolvedValue({
+    send: vi.fn().mockResolvedValue(undefined),
+    messages: { fetch: fetchHistory },
+  });
+  return fetchHistory;
 }
 
 // --- Tests ---
@@ -626,6 +649,134 @@ describe('DiscordChannel', () => {
           content: '[Reply to Bob] I agree with that',
         }),
       );
+    });
+
+    it('keeps the trigger at the start when a reply also mentions the bot', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const msg = createMessage({
+        content: '<@999888777> please respond',
+        mentionsBotId: true,
+        reference: { messageId: 'original_msg_id' },
+        guildName: 'Server',
+      });
+      await triggerMessage(msg);
+
+      const stored = vi.mocked(opts.onMessage).mock.calls[0][1];
+      expect(stored.content).toBe('@Andy [Reply to Bob] please respond');
+      expect(/^@Andy\b/i.test(stored.content)).toBe(true);
+    });
+  });
+
+  // --- Backfill of missed messages ---
+
+  describe('backfill', () => {
+    const lastSeen = '2024-01-01T12:00:00.000Z';
+    const missed = () => [
+      createMessage({
+        messageId: 'newer',
+        content: 'second missed',
+        createdAt: new Date('2024-01-01T12:10:00.000Z'),
+        guildName: 'Server',
+      }),
+      createMessage({
+        messageId: 'older',
+        content: 'first missed',
+        createdAt: new Date('2024-01-01T12:05:00.000Z'),
+        guildName: 'Server',
+      }),
+      createMessage({
+        messageId: 'already-stored',
+        content: 'seen before',
+        createdAt: new Date(lastSeen),
+        guildName: 'Server',
+      }),
+      createMessage({
+        messageId: 'from-bot',
+        content: 'bot reply',
+        createdAt: new Date('2024-01-01T12:06:00.000Z'),
+        isBot: true,
+        guildName: 'Server',
+      }),
+    ];
+
+    it('delivers messages newer than the last stored one, oldest first', async () => {
+      const opts = createTestOpts({ getLastMessageTime: () => lastSeen });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+      vi.mocked(opts.onMessage).mockClear();
+
+      const fetchHistory = mockChannelHistory(missed());
+      await triggerEvent('shardReady', 0);
+      await vi.waitFor(() => expect(opts.onMessage).toHaveBeenCalledTimes(2));
+
+      const delivered = vi
+        .mocked(opts.onMessage)
+        .mock.calls.map((call) => call[1].content);
+      expect(delivered).toEqual(['first missed', 'second missed']);
+
+      // `after` is the snowflake for the last stored timestamp
+      const expectedAfter = (
+        (BigInt(Date.parse(lastSeen)) - 1420070400000n) <<
+        22n
+      ).toString();
+      expect(fetchHistory).toHaveBeenCalledWith({
+        after: expectedAfter,
+        limit: 100,
+      });
+    });
+
+    it('runs on connect before resolving', async () => {
+      const opts = createTestOpts({ getLastMessageTime: () => lastSeen });
+      const channel = new DiscordChannel('test-token', opts);
+      const history = missed();
+      const { Client } = await import('discord.js');
+      const fetchSpy = vi
+        .spyOn((Client as any).prototype, 'login')
+        .mockImplementation(async function (this: any) {
+          this._ready = true;
+          this.channels.fetch = vi.fn().mockResolvedValue({
+            messages: {
+              fetch: vi.fn(async () => new Map(history.map((m) => [m.id, m]))),
+            },
+          });
+          for (const h of this.eventHandlers.get('ready') || []) {
+            await h({ user: this.user });
+          }
+        });
+
+      await channel.connect();
+
+      expect(opts.onMessage).toHaveBeenCalledTimes(2);
+      fetchSpy.mockRestore();
+    });
+
+    it('skips channels with no stored history', async () => {
+      const opts = createTestOpts({ getLastMessageTime: () => undefined });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const fetchHistory = mockChannelHistory(missed());
+      await triggerEvent('shardReady', 0);
+
+      expect(fetchHistory).not.toHaveBeenCalled();
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('survives a fetch failure', async () => {
+      const opts = createTestOpts({ getLastMessageTime: () => lastSeen });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      currentClient().channels.fetch = vi
+        .fn()
+        .mockRejectedValue(new Error('Missing Access'));
+      await triggerEvent('shardReady', 0);
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      expect(channel.isConnected()).toBe(true);
     });
   });
 

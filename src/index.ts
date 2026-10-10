@@ -43,6 +43,7 @@ import {
   getAllTasks,
   createTask,
   updateTask,
+  getLastMessageTime,
   getMessagesSince,
   getNewMessages,
   getRegisteredGroup,
@@ -761,7 +762,12 @@ async function startMessageLoop(): Promise<void> {
             // No active container — enqueue for a new one.
             // For task-bot groups, debounce so multiple messages in a
             // conversation are batched into one agent invocation.
-            if (isTaskBotGroup(group)) {
+            // A direct @mention is someone waiting on a reply, so it skips
+            // the quiet period and flushes whatever was being batched.
+            const isAddressed = groupMessages.some((m) =>
+              TRIGGER_PATTERN.test(m.content.trim()),
+            );
+            if (isTaskBotGroup(group) && !isAddressed) {
               const existingTimer = taskBotDebounceTimers.get(chatJid);
               if (existingTimer) clearTimeout(existingTimer);
               taskBotDebounceTimers.set(
@@ -780,6 +786,11 @@ async function startMessageLoop(): Promise<void> {
                 'Task-bot message debounced',
               );
             } else {
+              const pendingTimer = taskBotDebounceTimers.get(chatJid);
+              if (pendingTimer) {
+                clearTimeout(pendingTimer);
+                taskBotDebounceTimers.delete(chatJid);
+              }
               queue.enqueueMessageCheck(chatJid);
             }
           }
@@ -922,6 +933,7 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    getLastMessageTime,
   };
 
   // Create and connect all registered channels.

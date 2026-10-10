@@ -9,6 +9,8 @@ export interface ChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  // Optional: lets a channel fetch messages it missed while disconnected.
+  getLastMessageTime?: (chatJid: string) => string | undefined;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;

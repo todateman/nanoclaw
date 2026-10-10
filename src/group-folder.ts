@@ -42,3 +42,22 @@ export function resolveGroupIpcPath(folder: string): string {
   ensureWithinBase(ipcBaseDir, ipcPath);
   return ipcPath;
 }
+
+/**
+ * Per-chat IPC input directory. Several chats can share one group folder
+ * (e.g. task-bot channels), so follow-up messages and the _close sentinel
+ * must be scoped to the chat or a sibling chat's container will consume them.
+ */
+export function resolveGroupIpcInputPath(
+  folder: string,
+  chatJid: string,
+): string {
+  const inputBaseDir = path.join(resolveGroupIpcPath(folder), 'input');
+  const chatKey = chatJid.replace(/[^A-Za-z0-9_-]/g, '_');
+  if (!chatKey) {
+    throw new Error(`Invalid chat JID "${chatJid}"`);
+  }
+  const inputPath = path.resolve(inputBaseDir, chatKey);
+  ensureWithinBase(inputBaseDir, inputPath);
+  return inputPath;
+}

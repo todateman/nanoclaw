@@ -5,6 +5,7 @@ import { GroupQueue } from './group-queue.js';
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   MAX_CONCURRENT_CONTAINERS: 2,
 }));
 
@@ -403,6 +404,49 @@ describe('GroupQueue', () => {
     expect(closeWrites).toHaveLength(0);
 
     resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('scopes piped messages and _close to the chat when chats share a group folder', async () => {
+    const fs = await import('fs');
+    const resolvers: Array<() => void> = [];
+
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolvers.push(resolve);
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('dc:111');
+    queue.enqueueMessageCheck('dc:222');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess('dc:111', {} as any, 'container-1', 'task-bot');
+    queue.registerProcess('dc:222', {} as any, 'container-2', 'task-bot');
+
+    const renameSync = vi.mocked(fs.default.renameSync);
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    renameSync.mockClear();
+    writeFileSync.mockClear();
+
+    expect(queue.sendMessage('dc:111', 'for the first chat')).toBe(true);
+    expect(queue.sendMessage('dc:222', 'for the second chat')).toBe(true);
+
+    const pipedTo = renameSync.mock.calls.map((call) => String(call[1]));
+    expect(pipedTo).toHaveLength(2);
+    expect(pipedTo[0]).toContain('/ipc/task-bot/input/dc_111/');
+    expect(pipedTo[1]).toContain('/ipc/task-bot/input/dc_222/');
+
+    queue.closeStdin('dc:222');
+    const closeWrites = writeFileSync.mock.calls
+      .map((call) => String(call[0]))
+      .filter((p) => p.endsWith('_close'));
+    expect(closeWrites).toEqual([
+      '/tmp/nanoclaw-test-data/ipc/task-bot/input/dc_222/_close',
+    ]);
+
+    for (const resolve of resolvers) resolve();
     await vi.advanceTimersByTimeAsync(10);
   });
 
