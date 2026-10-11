@@ -28,6 +28,14 @@ export function stripInternalTags(text: string): string {
   return text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
 }
 
+/**
+ * The SDK reports an exhausted context window as a normal result whose text is
+ * "Prompt is too long". Resuming the same session can never succeed.
+ */
+export function isContextOverflow(text: string): boolean {
+  return /^\s*prompt is too long\b/i.test(stripInternalTags(text));
+}
+
 export function formatOutbound(rawText: string): string {
   const text = stripInternalTags(rawText);
   if (!text) return '';

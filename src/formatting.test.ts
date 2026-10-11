@@ -5,6 +5,7 @@ import {
   escapeXml,
   formatMessages,
   formatOutbound,
+  isContextOverflow,
   stripInternalTags,
 } from './router.js';
 import { NewMessage } from './types.js';
@@ -252,5 +253,20 @@ describe('trigger gating (requiresTrigger interaction)', () => {
   it('non-main group with requiresTrigger=false always processes (no trigger needed)', () => {
     const msgs = [makeMsg({ content: 'hello no trigger' })];
     expect(shouldProcess(false, false, msgs)).toBe(true);
+  });
+});
+
+describe('isContextOverflow', () => {
+  it('detects the SDK context overflow result', () => {
+    expect(isContextOverflow('Prompt is too long')).toBe(true);
+    expect(isContextOverflow('  prompt is too long.\n')).toBe(true);
+  });
+
+  it('ignores ordinary replies that merely mention it', () => {
+    expect(isContextOverflow('Done')).toBe(false);
+    expect(isContextOverflow('The prompt is too long for X')).toBe(false);
+    expect(isContextOverflow('<internal>タスク検出なし</internal>')).toBe(
+      false,
+    );
   });
 });

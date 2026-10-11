@@ -40,6 +40,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
+  deleteSession,
   getAllTasks,
   createTask,
   updateTask,
@@ -59,7 +60,12 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatMessages,
+  formatOutbound,
+  isContextOverflow,
+} from './router.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -535,6 +541,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  let contextOverflow = false;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
@@ -546,7 +553,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
+      if (isContextOverflow(raw)) {
+        // Don't post the SDK's error text to the channel. Wind the container
+        // down so the retry below can start with a fresh session.
+        contextOverflow = true;
+        queue.closeStdin(chatJid);
+      } else if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
@@ -565,6 +577,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+
+  if (contextOverflow && !outputSentToUser) {
+    // The session's history no longer fits in the context window; every
+    // resume would fail the same way. Drop it and retry on a new session.
+    delete sessions[group.folder];
+    deleteSession(group.folder);
+    lastAgentTimestamp[chatJid] = previousCursor;
+    saveState();
+    logger.warn(
+      { group: group.name },
+      'Context window exhausted, session reset and message retry scheduled',
+    );
+    return false;
+  }
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
