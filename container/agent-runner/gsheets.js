@@ -32,6 +32,20 @@ const SHEET_NAME = process.env.SHEET_NAME || 'タスク一覧';
 const CREDENTIALS_PATH = '/workspace/extra/gsheets/credentials.json';
 const SPREADSHEET_ID_FILE = '/workspace/group/.spreadsheet_id';
 
+/**
+ * Normalize text typed on the command line / in JSON so that escaped newline
+ * sequences become real line breaks in the cell. Bash does not expand "\\n"
+ * inside double quotes, so the literal two characters arrive as-is and would
+ * otherwise be written to the sheet verbatim (shown as "¥n" in ja locales).
+ */
+function normalizeText(value) {
+  if (typeof value !== 'string') return value;
+  return value
+    .replace(/\\r\\n|\\n|\\r/g, '\n')
+    .replace(/¥n/g, '\n')
+    .replace(/\r\n?/g, '\n');
+}
+
 function resolveSpreadsheetId() {
   if (SPREADSHEET_ID) return SPREADSHEET_ID;
   if (existsSync(SPREADSHEET_ID_FILE)) {
@@ -146,6 +160,7 @@ function findTaskRow(rows, taskHint) {
 }
 
 async function updateStatus(taskHint, newStatus) {
+  newStatus = normalizeText(newStatus);
   const spreadsheetId = resolveSpreadsheetId();
   const rows = await getAllRows(spreadsheetId);
 
@@ -172,6 +187,7 @@ async function updateStatus(taskHint, newStatus) {
 }
 
 async function updateProgress(taskHint, progressNote, newStatus) {
+  progressNote = normalizeText(progressNote);
   const spreadsheetId = resolveSpreadsheetId();
   const rows = await getAllRows(spreadsheetId);
 
@@ -247,8 +263,8 @@ async function batchUpdate(updatesJson) {
     const existingProgress = rows[match.matchRow - 2][COL_PROGRESS] || '';
     const updatedProgress = upd.progress
       ? existingProgress
-        ? `${existingProgress}\n${upd.progress}`
-        : upd.progress
+        ? `${existingProgress}\n${normalizeText(upd.progress)}`
+        : normalizeText(upd.progress)
       : existingProgress;
 
     if (upd.status) {
@@ -286,6 +302,8 @@ async function batchUpdate(updatesJson) {
 }
 
 async function addTask(name, category, priority, dueDate, assignee) {
+  name = normalizeText(name);
+  category = normalizeText(category);
   const spreadsheetId = resolveSpreadsheetId();
   const rows = await getAllRows(spreadsheetId);
   const newId = `T${String(rows.length + 1).padStart(4, '0')}`;
